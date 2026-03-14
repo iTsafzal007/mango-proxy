@@ -99,8 +99,66 @@ async function autoSync() {
           if (!s) continue;
           const mapped = stMap[(s.status || '').toLowerCase()];
           if (!mapped || mapped === o.status) continue;
-          await fbPatch(`/orders/${ordId}`, { status: mapped, remains: +(s.remains||0), startCount: +(s.start_count||o.startCount||0) });
+
+          const newRemains = +(s.remains||0);
+          const newSc = +(s.start_count||o.startCount||0);
+
+          // Update order status
+          await fbPatch(`/orders/${ordId}`, { status: mapped, remains: newRemains, startCount: newSc });
           console.log(`[STATUS] ${ordId}: ${o.status} → ${mapped}`);
+
+          // ✅ CANCELED → Full refund
+          if (mapped === 'canceled' && o.userId && !o.cancelRefund) {
+            try {
+              const userSnap = await fbGet(`/users/${o.userId}`);
+              if (userSnap) {
+                const refundAmt = parseFloat((+(o.charge||0)).toFixed(6));
+                const newBal = parseFloat((+(userSnap.balance||0) + refundAmt).toFixed(6));
+                const newUsed = parseFloat(Math.max(0, +(userSnap.usedBalance||0) - refundAmt).toFixed(6));
+                await fbPatch(`/users/${o.userId}`, { balance: newBal, usedBalance: newUsed });
+                await fbPatch(`/orders/${ordId}`, { cancelRefund: refundAmt, cancelNote: `Full refund ৳${refundAmt.toFixed(4)} (auto-canceled)` });
+                console.log(`[REFUND] Cancel full ৳${refundAmt} → ${o.userId}`);
+              }
+            } catch(e) { console.error('[CANCEL REFUND]', e.message); }
+          }
+
+          // ✅ PARTIAL → remains এর টাকা ফেরত
+          if (mapped === 'partial' && o.userId && !o.partialRefund) {
+            try {
+              const totalQty = +(o.quantity||0);
+              const remains = newRemains > 0 ? newRemains : +(o.remains||0);
+              if (remains > 0 && totalQty > 0) {
+                const userSnap = await fbGet(`/users/${o.userId}`);
+                if (userSnap) {
+                  const refundRatio = remains / totalQty;
+                  const refundAmt = parseFloat((+(o.charge||0) * refundRatio).toFixed(6));
+                  const deliveredQty = totalQty - remains;
+                  const newBal = parseFloat((+(userSnap.balance||0) + refundAmt).toFixed(6));
+                  const newUsed = parseFloat(Math.max(0, +(userSnap.usedBalance||0) - refundAmt).toFixed(6));
+                  await fbPatch(`/users/${o.userId}`, { balance: newBal, usedBalance: newUsed });
+                  await fbPatch(`/orders/${ordId}`, { partialRefund: refundAmt, partialNote: `${deliveredQty}/${totalQty} delivered. ৳${refundAmt.toFixed(4)} refunded.` });
+                  console.log(`[REFUND] Partial ৳${refundAmt} (${deliveredQty}/${totalQty}) → ${o.userId}`);
+                }
+              }
+            } catch(e) { console.error('[PARTIAL REFUND]', e.message); }
+          }
+
+          // ✅ Referral commission — completed/partial এ একবার
+          if ((mapped === 'completed' || mapped === 'partial') && o.refBy && o.commissionOn && +(o.commission||0) > 0 && !o.commissionPaid) {
+            try {
+              const refUid = 'tg_' + o.refBy;
+              const refUser = await fbGet(`/users/${refUid}`);
+              if (refUser) {
+                const comm = parseFloat(o.commission||0);
+                await fbPatch(`/users/${refUid}`, {
+                  balance: parseFloat((+(refUser.balance||0) + comm).toFixed(6)),
+                  refEarnings: parseFloat((+(refUser.refEarnings||0) + comm).toFixed(6))
+                });
+                await fbPatch(`/orders/${ordId}`, { commissionPaid: true });
+                console.log(`[COMMISSION] ৳${comm} → ${refUid}`);
+              }
+            } catch(e) { console.error('[COMMISSION]', e.message); }
+          }
         }
       } catch (_) {}
     }
