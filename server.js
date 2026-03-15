@@ -68,7 +68,13 @@ async function autoSync() {
     );
     for (const [id, o] of waiting) {
       try {
-        const j = await smmPost(apiUrl, new URLSearchParams({ key: apiKey, action: 'add', service: o.serviceId, link: o.link, quantity: o.quantity }).toString());
+        // Use provider if order has one
+        let useUrl = apiUrl, useKey = apiKey;
+        if (o.providerId) {
+          const provSnap = await fbGet(`/apiProviders/${o.providerId}`);
+          if (provSnap && provSnap.apiUrl) { useUrl = provSnap.apiUrl; useKey = provSnap.apiKey; }
+        }
+        const j = await smmPost(useUrl, new URLSearchParams({ key: useKey, action: 'add', service: o.serviceId, link: o.link, quantity: o.quantity }).toString());
         if (j?.order) {
           await fbPatch(`/orders/${id}`, { apiOrderId: String(j.order), status: 'inprogress', needBalance: false, apiError: null });
           console.log(`[DELIVER] ${id} → #${j.order}`);
